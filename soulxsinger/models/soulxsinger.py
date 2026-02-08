@@ -140,7 +140,7 @@ class SoulXSinger(nn.Module):
                 print("Warning: pitch_shift is True but note_pitch or f0 is None. Set f0_shift to 0.")
                 f0_shift = 0
         else:
-            f0_shift = 0
+            f0_shift = pitch_shift
 
         if gt_f0 is None or pt_f0 is None:
             gt_f0, pt_f0 = torch.zeros_like(gt_mel2note).float().to(gt_mel2note.device), torch.zeros_like(pt_mel2note).float().to(pt_mel2note.device)

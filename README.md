@@ -122,6 +122,12 @@ bash example/infer.sh
 
 This script relies on metadata generated from the preprocessing pipeline, including vocal separation and transcription. Users should follow the steps in [preprocess](preprocess/README.md) to prepare the necessary metadata before running the demo with their own data.
 
+**⚠️ Important Note**
+The metadata produced by the automatic preprocessing pipeline may not perfectly align the singing audio with the corresponding lyrics and musical notes. For best synthesis quality, we strongly recommend manually correcting the alignment using the 🎼 [Midi-Editor](https://huggingface.co/spaces/Soul-AILab/SoulX-Singer-Midi-Editor). 
+
+How to use the Midi-Editor:
+- [Eiditing Metadata with Midi-Editor](preprocess/README.md#L104-L105)
+
 
 ## 🚧 Roadmap
 
