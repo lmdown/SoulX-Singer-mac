@@ -487,6 +487,29 @@ def _instruction_md() -> str:
 
 def render_interface() -> gr.Blocks:
     with gr.Blocks(title="SoulX-Singer 歌声合成Demo", theme=gr.themes.Default()) as page:
+        gr.HTML(
+            '<div style="'
+            'text-align: center; '
+            'padding: 1.25rem 0 1.5rem; '
+            'margin-bottom: 0.5rem;'
+            '">'
+            '<div style="'
+            'display: inline-block; '
+            'font-size: 1.75rem; '
+            'font-weight: 700; '
+            'letter-spacing: 0.02em; '
+            'color: #1a1a2e; '
+            'line-height: 1.3;'
+            '">SoulX-Singer</div>'
+            '<div style="'
+            'width: 80px; '
+            'height: 3px; '
+            'margin: 1rem auto 0; '
+            'background: linear-gradient(90deg, transparent, #6366f1, transparent); '
+            'border-radius: 2px;'
+            '"></div>'
+            '</div>'
+        )
         # Auto-detect browser language: run after Gradio mounts
         gr.HTML(
             '<script type="text/javascript">'
