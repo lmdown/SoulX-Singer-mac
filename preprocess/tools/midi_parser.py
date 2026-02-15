@@ -21,15 +21,15 @@ from .g2p import g2p_transform
 
 
 # Audio, MIDI and segmentation constants
-SAMPLE_RATE = 44100     # Hz, fixed for all audio processing in this script to ensure consistent timing with MIDI ticks.
-MIDI_TICKS_PER_BEAT = 500
-MIDI_TEMPO = 500000     # microseconds per beat (120 BPM)
-MIDI_TIME_SIGNATURE = (4, 4)
-MIDI_VELOCITY = 64
-END_EXTENSION_SEC = 0.4  # extend each segment end by this much silence (sec) to give the model more context
-MAX_GAP_SEC = 2.0  # gap (sec) above which we start a new segment
-MAX_SEGMENT_DUR_SUM_SEC = 60.0  # max cumulative note duration per segment (sec)
-SILENCE_THRESHOLD_SEC = 0.2  # treat as separate <SP> if gap larger
+SAMPLE_RATE = 44100             # Audio sample rate for any wav cuts during midi2meta
+MIDI_TICKS_PER_BEAT = 500       # The number of MIDI ticks per beat; affects the time resolution of MIDI output and conversion accuracy.
+MIDI_TEMPO = 500000             # Microseconds per beat (120 BPM)
+MIDI_TIME_SIGNATURE = (4, 4)    # Default time signature; not critical for conversion but included in MIDI output.
+MIDI_VELOCITY = 64              # Default velocity for note_on events; not critical for conversion but required for MIDI format.
+END_EXTENSION_SEC = 0.4         # Extend each segment end by this much silence (sec) to give the model more context
+MAX_GAP_SEC = 2.0               # Gap threshold to split segments in midi2meta (sec)
+MAX_SEGMENT_DUR_SUM_SEC = 60.0  # Max total duration sum of notes in a single metadata segment before splitting into multiple segments (sec)
+SILENCE_THRESHOLD_SEC = 0.2     # Threshold to insert explicit <SP> note for long silences between notes in midi2notes (sec)
 
 
 @dataclass
@@ -44,6 +44,80 @@ class Note:
     @property
     def end_s(self) -> float:
         return self.start_s + self.note_dur
+
+
+def _seconds_to_ticks(seconds: float, ticks_per_beat: int, tempo: int) -> int:
+    """Convert seconds to MIDI ticks based on tempo and ticks per beat."""
+    return int(round(seconds * ticks_per_beat * 1_000_000 / tempo))
+
+
+def _append_segment_to_meta(
+    meta_data: List[dict],
+    meta_path_str: str,
+    cut_wavs_output_dir: str | None,
+    vocal_file: str | None,
+    language: str,
+    audio_data: Any | None,
+    pitch_extractor: F0Extractor | None,
+    note_start: List[float],
+    note_end: List[float],
+    note_text: List[Any],
+    note_pitch: List[Any],
+    note_type: List[Any],
+    note_dur: List[float],
+) -> None:
+    """Helper function for midi2meta to append the current segment (accumulated in note_*) to meta_data list, with optional wav cut and pitch extraction."""
+    if not all((note_start, note_end, note_text, note_pitch, note_type, note_dur)):
+        return
+
+    base_name = os.path.splitext(os.path.basename(meta_path_str))[0]
+    item_name = f"{base_name}_{len(meta_data)}"
+    wav_fn = None
+    if cut_wavs_output_dir and vocal_file and audio_data is not None:
+        wav_fn = os.path.join(cut_wavs_output_dir, f"{item_name}.wav")
+        end_pad = int(END_EXTENSION_SEC * SAMPLE_RATE)
+        start_sample = max(0, int(note_start[0] * SAMPLE_RATE))
+        end_sample = min(len(audio_data), int(note_end[-1] * SAMPLE_RATE) + end_pad)
+
+        end_pad_dur = (end_sample / SAMPLE_RATE - note_end[-1]) if end_sample > int(note_end[-1] * SAMPLE_RATE) else 0.0
+        if end_pad_dur > 0:
+            note_dur = note_dur + [end_pad_dur]
+            note_text = note_text + ["<SP>"]
+            note_pitch = note_pitch + [0]
+            note_type = note_type + [1]
+        start_ms = int(start_sample / SAMPLE_RATE * 1000)
+        end_ms = int(end_sample / SAMPLE_RATE * 1000)
+        write(wav_fn, audio_data[start_sample:end_sample], SAMPLE_RATE)
+    else:
+        start_ms = int(note_start[0] * 1000)
+        end_ms = int(note_end[-1] * 1000)
+
+    if pitch_extractor is not None:
+        if not wav_fn or not os.path.isfile(wav_fn):
+            raise FileNotFoundError(f"Segment wav file not found: {wav_fn}")
+        f0 = pitch_extractor.process(wav_fn)
+    else:
+        f0 = []
+
+    note_text_list = list(note_text)
+    note_pitch_list = list(note_pitch)
+    note_type_list = list(note_type)
+    note_dur_list = list(note_dur)
+
+    meta_data.append(
+        {
+            "index": item_name,
+            "language": language,
+            "time": [start_ms, end_ms],
+            "duration": " ".join(str(round(x, 2)) for x in note_dur_list),
+            "text": " ".join(note_text_list),
+            "phoneme": " ".join(g2p_transform(note_text_list, language)),
+            "note_pitch": " ".join(str(x) for x in note_pitch_list),
+            "note_type": " ".join(str(x) for x in note_type_list),
+            "f0": " ".join(str(round(float(x), 1)) for x in f0),
+        }
+    )
+
 
 def meta2notes(meta_path: str) -> List[Note]:
     """Parse SoulX-Singer metadata JSON into a flat list of Note (absolute start_s)."""
@@ -80,97 +154,17 @@ def meta2notes(meta_path: str) -> List[Note]:
             current_s += float(dur)
     return notes
 
-def _append_segment_to_meta(
-    meta_path_str: str,
-    cut_wavs_output_dir: str | None,
-    vocal_file: str | None,
-    language: str,
-    audio_data: Any | None,
-    meta_data: List[dict],
-    note_start: List[float],
-    note_end: List[float],
-    note_text: List[Any],
-    note_pitch: List[Any],
-    note_type: List[Any],
-    note_dur: List[float],
-) -> None:
-    """Write one segment wav and append one segment dict to meta_data. Caller clears note_* lists after."""
-    if not all((note_start, note_end, note_text, note_pitch, note_type, note_dur)):
-        return
 
-    base_name = os.path.splitext(os.path.basename(meta_path_str))[0]
-    item_name = f"{base_name}_{len(meta_data)}"
-    wav_fn = None
-    if cut_wavs_output_dir and vocal_file and audio_data is not None:
-        wav_fn = os.path.join(cut_wavs_output_dir, f"{item_name}.wav")
-        end_pad = int(END_EXTENSION_SEC * SAMPLE_RATE)
-        start_sample = max(0, int(note_start[0] * SAMPLE_RATE))
-        end_sample = min(len(audio_data), int(note_end[-1] * SAMPLE_RATE) + end_pad)
-
-        end_pad_dur = (end_sample / SAMPLE_RATE - note_end[-1]) if end_sample > int(note_end[-1] * SAMPLE_RATE) else 0.0
-        if end_pad_dur > 0:
-            note_dur = note_dur + [end_pad_dur]
-            note_text = note_text + ["<SP>"]
-            note_pitch = note_pitch + [0]
-            note_type = note_type + [1]
-        start_ms = int(start_sample / SAMPLE_RATE * 1000)
-        end_ms = int(end_sample / SAMPLE_RATE * 1000)
-        write(wav_fn, audio_data[start_sample:end_sample], SAMPLE_RATE)
-    else:
-        start_ms = int(note_start[0] * 1000)
-        end_ms = int(note_end[-1] * 1000)
-
-    meta_data.append({
-        "item_name": item_name,
-        "wav_fn": wav_fn,
-        "origin_wav_fn": vocal_file,
-        "start_time_ms": start_ms,
-        "end_time_ms": end_ms,
-        "language": language,
-        "note_text": list(note_text),
-        "note_pitch": list(note_pitch),
-        "note_type": list(note_type),
-        "note_dur": list(note_dur),
-    })
-
-
-def convert_meta(meta_data: List[dict], pitch_extractor: F0Extractor | None) -> List[dict]:
-    converted_data = []
-
-    for item in meta_data:
-        language = item.get("language", "Mandarin")
-        wav_fn = item.get("wav_fn")
-        if pitch_extractor is not None:
-            if not wav_fn or not os.path.isfile(wav_fn):
-                raise FileNotFoundError(f"Segment wav file not found: {wav_fn}")
-            f0 = pitch_extractor.process(wav_fn)
-        else:
-            f0 = []
-        converted_item = {
-            "index": item.get("item_name"),
-            "language": language,
-            "time": [item.get("start_time_ms", 0), item.get("end_time_ms", sum(item["note_dur"]) * 1000)],
-            "duration": " ".join(str(round(x, 2)) for x in item.get("note_dur", [])),
-            "text": " ".join(item.get("note_text", [])),
-            "phoneme": " ".join(g2p_transform(item.get("note_text", []), language)),
-            "note_pitch": " ".join(str(x) for x in item.get("note_pitch", [])),
-            "note_type": " ".join(str(x) for x in item.get("note_type", [])),
-            "f0": " ".join(str(round(float(x), 1)) for x in f0),
-        }
-        converted_data.append(converted_item)
-
-    return converted_data
-
-
-def _edit_data_to_meta(
-    meta_path_str: str,
-    edit_data: List[dict],
+def notes2meta(
+    notes: List[Note],
+    meta_path: str,
     vocal_file: str | None,
     language: str,
     pitch_extractor: F0Extractor | None,
 ) -> None:
-    """Write SoulX-Singer metadata JSON from edit_data (list of {start, end, note_text, note_pitch, note_type})."""
-    # Store temporary cut wavs beside the source vocal (same folder, fixed subdir name).
+    """Write SoulX-Singer metadata JSON from a list of Note (segmenting + wav cuts)."""
+    meta_path_str = str(meta_path)
+
     cut_wavs_output_dir = None
     if vocal_file:
         cut_wavs_output_dir = os.path.join(os.path.dirname(vocal_file), "cut_wavs_tmp")
@@ -191,12 +185,13 @@ def _edit_data_to_meta(
     def flush_current_segment() -> None:
         nonlocal dur_sum
         _append_segment_to_meta(
+            meta_data,
             meta_path_str,
             cut_wavs_output_dir,
             vocal_file,
             language,
             audio_data,
-            meta_data,
+            pitch_extractor,
             note_start,
             note_end,
             note_text,
@@ -212,23 +207,36 @@ def _edit_data_to_meta(
         note_end.clear()
         dur_sum = 0.0
 
-    for entry in edit_data:
-        start = float(entry["start"])
-        end = float(entry["end"])
-        text = entry["note_text"]
-        pitch = entry["note_pitch"]
-        type_ = entry["note_type"]
+    def append_note(start: float, end: float, text: str, pitch: int, type_: int) -> None:
+        nonlocal dur_sum
+        duration = end - start
+        if duration <= 0:
+            return
 
-        if text == "" or pitch == "" or type_ == "":
-            note_text.append("<SP>")
-            note_pitch.append(0)
-            note_type.append(1)
-            note_dur.append(end - start)
+        if len(note_text) > 0 and text == "<SP>" and note_text[-1] == "<SP>":
+            note_dur[-1] += duration
+            note_end[-1] = end
+        else:
+            note_text.append(text)
+            note_pitch.append(pitch)
+            note_type.append(type_)
+            note_dur.append(duration)
             note_start.append(start)
             note_end.append(end)
-            dur_sum += end - start
-            continue
+        dur_sum += duration
 
+    for note in notes:
+        start = float(note.start_s)
+        end = float(note.end_s)
+        text = note.note_text
+        pitch = note.note_pitch
+        type_ = note.note_type
+
+        if text == "" or pitch == "" or type_ == "":
+            append_note(start, end, "<SP>", 0, 1)
+            continue
+        
+        # cut the segment when ends with a long <SP> note
         if (
             len(note_text) > 0
             and note_text[-1] == "<SP>"
@@ -244,84 +252,23 @@ def _edit_data_to_meta(
             dur_sum = sum(note_dur)
             flush_current_segment()
 
+        # cut the segment if adding the current note would exceed the max duration sum threshold
         if dur_sum + (end - start) > MAX_SEGMENT_DUR_SUM_SEC and len(note_text) > 0:
             flush_current_segment()
 
-        note_text.append(text)
-        note_pitch.append(int(pitch))
-        note_type.append(int(type_))
-        note_dur.append(end - start)
-        note_start.append(start)
-        note_end.append(end)
-        dur_sum += end - start
+        append_note(start, end, text, int(pitch), int(type_))
 
     if note_text:
         flush_current_segment()
 
-    # Merge only consecutive <SP> tokens to reduce fragmentation in silence regions.
-    for segment in meta_data:
-        phoneme = segment['note_text']
-        duration = segment['note_dur']
-        note_pitch = segment['note_pitch']
-        note_type = segment['note_type']
-
-        merged_items: List[Tuple[str, float, int, int]] = []
-        prev_item = None
-        for text, dur, pitch, note_type in zip(phoneme, duration, note_pitch, note_type):
-            if prev_item and text == "<SP>" and prev_item[0] == "<SP>":
-                merged_items[-1] = (prev_item[0], prev_item[1] + dur, prev_item[2], prev_item[3])
-            else:
-                merged_items.append((text, dur, pitch, note_type))
-            prev_item = merged_items[-1]
-
-        segment['note_text'] = [item[0] for item in merged_items]
-        segment['note_dur'] = [item[1] for item in merged_items]
-        segment['note_pitch'] = [item[2] for item in merged_items]
-        segment['note_type'] = [item[3] for item in merged_items]
-
-    converted_data = convert_meta(meta_data, pitch_extractor)
-
     with open(meta_path_str, "w", encoding="utf-8") as f:
-        json.dump(converted_data, f, ensure_ascii=False, indent=2)
+        json.dump(meta_data, f, ensure_ascii=False, indent=2)
 
-    # Clean up temporary cut wavs directory
     if cut_wavs_output_dir:
         try:
             shutil.rmtree(cut_wavs_output_dir, ignore_errors=True)
         except Exception:
             pass
-
-
-def notes2meta(
-    notes: List[Note],
-    meta_path: str,
-    vocal_file: str | None,
-    language: str,
-    pitch_extractor: F0Extractor | None,
-) -> None:
-    """Write SoulX-Singer metadata JSON from a list of Note (segmenting + wav cuts)."""
-    edit_data = [
-        {
-            "start": n.start_s,
-            "end": n.end_s,
-            "note_text": n.note_text,
-            "note_pitch": str(n.note_pitch),
-            "note_type": str(n.note_type),
-        }
-        for n in notes
-    ]
-    _edit_data_to_meta(
-        str(meta_path),
-        edit_data,
-        vocal_file,
-        language,
-        pitch_extractor=pitch_extractor,
-    )
-
-
-def _seconds_to_ticks(seconds: float, ticks_per_beat: int, tempo: int) -> int:
-    # ticks = seconds * (ticks_per_beat beats) / (tempo microseconds per beat)
-    return int(round(seconds * ticks_per_beat * 1_000_000 / tempo))
 
 
 def notes2midi(
@@ -380,7 +327,6 @@ def notes2midi(
             )
         )
 
-    # Keep deterministic ordering at same tick: note_off -> lyric -> note_on.
     events.sort(key=lambda x: (x[0], x[1]))
 
     mid = mido.MidiFile(ticks_per_beat=MIDI_TICKS_PER_BEAT)
@@ -408,10 +354,7 @@ def notes2midi(
 
 
 def midi2notes(midi_path: str) -> List[Note]:
-    """Parse MIDI file into a list of Note.
-
-    Merges all tracks and uses the latest encountered set_tempo as global tempo.
-    """
+    """Parse MIDI file into a list of Note."""
     mid = mido.MidiFile(midi_path)
     ticks_per_beat = mid.ticks_per_beat
     tempo = 500000
@@ -516,16 +459,16 @@ def midi2notes(midi_path: str) -> List[Note]:
         lyric = n.get("lyric", "")
         # SoulX-Singer convention mapping from lyric token to note_type/text.
         if not lyric:
-            tp = 2
+            note_type = 2
             text = "啦"
         elif lyric == "<SP>":
-            tp = 1
+            note_type = 1
             text = "<SP>"
         elif lyric == "-":
-            tp = 3
+            note_type = 3
             text = raw_notes[idx - 1].get("lyric", "-") if idx > 0 else "-"
         else:
-            tp = 2
+            note_type = 2
             text = lyric
 
         if start_s - prev_end_s > SILENCE_THRESHOLD_SEC:
@@ -549,7 +492,7 @@ def midi2notes(midi_path: str) -> List[Note]:
                 note_dur=dur_s,
                 note_text=text,
                 note_pitch=n["midi"],
-                note_type=tp,
+                note_type=note_type,
             )
         )
         prev_end_s = end_s
