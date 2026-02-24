@@ -148,8 +148,9 @@ python webui.py
 - [x] 🌐 Online MIDI Editor deployment on Hugging Face Spaces
 - [x] 🌐 Online demo deployment on Hugging Face Spaces  
 - [x] 📊 Release the SoulX-Singer-Eval benchmark  
-- [ ] Inference support for user-friendly MIDI-based input
+- [ ] 🎹 Inference support for user-friendly MIDI-based input
 - [ ] 📚 Comprehensive tutorials and usage documentation  
+- [ ] 🎵 Support for wav-to-wav singing voice conversion (without transcription)
 
 
 ## 🙏 Acknowledgements
