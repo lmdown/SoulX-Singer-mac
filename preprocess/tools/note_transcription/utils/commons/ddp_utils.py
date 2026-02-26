@@ -5,12 +5,44 @@ import torch.utils.data
 import torch
 from packaging import version
 
+
+def _is_mps_device(device):
+    """Check if the device is MPS (Apple Silicon)."""
+    if isinstance(device, str):
+        return device.startswith("mps")
+    elif hasattr(device, "type"):
+        return device.type == "mps"
+    return False
+
+
+def _move_to_cpu(data):
+    """Recursively move all tensors in data to CPU."""
+    if isinstance(data, torch.Tensor):
+        return data.cpu()
+    elif isinstance(data, list):
+        return [_move_to_cpu(item) for item in data]
+    elif isinstance(data, tuple):
+        return tuple(_move_to_cpu(item) for item in data)
+    elif isinstance(data, dict):
+        return {k: _move_to_cpu(v) for k, v in data.items()}
+    else:
+        return data
+
+
 class DDP(DistributedDataParallel):
     """
     Override the forward call in lightning so it goes to training and validation step respectively
     """
 
     def forward(self, *inputs, **kwargs):  # pragma: no cover
+        if _is_mps_device(self.device_ids[0] if self.device_ids else None):
+            # Force CPU execution for MPS to avoid scatter() complex tensor issues
+            # Move all inputs and kwargs to CPU recursively
+            cpu_inputs = [_move_to_cpu(inp) for inp in inputs]
+            cpu_kwargs = {k: _move_to_cpu(v) for k, v in kwargs.items()}
+            # Run on CPU
+            with torch.device('cpu'):
+                return self.module(*cpu_inputs, **cpu_kwargs)
         # if version.parse(torch.__version__[:6]) < version.parse("1.11"):
         if version.parse(torch.__version__) < version.parse("1.11"):    # fix the hard [:6] problem
             self._sync_params()
